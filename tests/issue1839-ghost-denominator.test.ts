@@ -317,3 +317,37 @@ test("#1839 G3: overflow arming is tagged 'overflow-arm', never billing-grade 'u
         await h.close();
     }
 });
+
+test("#1839 G3b: an un-rescuable numberless overflow passes through and keeps 'overflow-arm' provenance", async () => {
+    const id = "sess-1839-g3b";
+    const h = await startHarness(id, [
+        { when: "step two?", status: 400, body: '{"error":{"message":"prompt is too long"}}' }, // turn 2: overflow, no window number
+    ]);
+    try {
+        const base: Msg[] = [{ role: "user", content: "hello" }];
+        const r1 = await h.post(base);
+        assert.equal(r1.status, 200, "turn 1 succeeds");
+        await r1.text();
+
+        const msgs2: Msg[] = [...base, { role: "assistant", content: "ok, done." }, { role: "user", content: "step two?" }];
+        const r2 = await h.post(msgs2);
+        assert.equal(r2.status, 400, "with nothing foldable the overflow rejection still passes through");
+        await r2.text();
+        const s = h.session();
+        assert.equal(s.stats.lastInputTokensSource, "overflow-arm", "armed value must carry its own provenance, not 'usage'");
+        assert.ok(s.stats.overflowArmTokens! > 0, "side-request guard armed (#1110)");
+        assert.ok(s.stats.lastInputTokens > 0 && s.stats.lastInputTokens <= WINDOW, "arm bounded by the declared window");
+        const armVal = s.stats.lastInputTokens;
+        assert.ok(h.logs.some((l) => l.includes("armed emergency shrink at ~")), "arm warning logged");
+
+        const msgs3: Msg[] = [...msgs2, { role: "assistant", content: "working." }, { role: "user", content: "step three?" }];
+        const r3 = await h.post(msgs3);
+        assert.equal(r3.status, 200, "turn 3 succeeds");
+        await r3.text();
+        const sized = lastNudgeSized(h.logs, id);
+        assert.equal(sized, armVal, "fast path still accepts the armed value — rescue chain intact");
+        assert.equal(h.relay.nonStreamCalls(), 0, "no preflight summary calls");
+    } finally {
+        await h.close();
+    }
+});
