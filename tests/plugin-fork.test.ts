@@ -1345,6 +1345,21 @@ test("HTTP raw-snapshot retention cap fails closed instead of growing without bo
     }
 });
 
+test("HTTP 409 names the failed reconstruction gate on the generic path (#5188)", { timeout: 60_000 }, async () => {
+    // #5188 review: the generic SNAPSHOT_UNAVAILABLE body must say WHICH
+    // reconstruction gate fired so a bare 409 is diagnosable — while the capped
+    // refusal above keeps its pinned byte-exact message (no suffix there).
+    const h = await harness();
+    try {
+        const session = getSession("recon-gate");
+        assert.equal(session.pluginSnapshot, undefined);
+        assert.equal(session.metadata.publicSnapshotCapped, undefined);
+        const snapshot = await h.request("/__bili/plugin/snapshot?conversationId=recon-gate");
+        assert.equal(snapshot.status, 409);
+        assert.equal((snapshot.body as { error?: string }).error, "Error: raw snapshot unavailable; send a fresh plugin model request [reconstruction: empty-lastPassIds]");
+    } finally { await h.close(); }
+});
+
 test("HTTP raw-snapshot retention cap lifts when the raw history shrinks below it again", { timeout: 60_000 }, async () => {
     const previous = process.env.BILI_PUBLIC_SNAPSHOT_CAP_BYTES;
     process.env.BILI_PUBLIC_SNAPSHOT_CAP_BYTES = "1";
@@ -1462,6 +1477,10 @@ test("HTTP a mid-history rewrite replaces the snapshot wholesale with an exact b
 });
 
 test("HTTP a cold-restored non-retained parent serves its intact raw tail immediately (#5140)", { timeout: 60_000 }, async () => {
+    // Pin the mode this raw-tail proof requires: under the runner's legacy
+    // baseline no unified rows exist and forkSnapshot fails closed (#4599).
+    const oldMode = process.env.BILI_STORAGE_UNIFIED;
+    process.env.BILI_STORAGE_UNIFIED = "full";
     const h = await harness(true);
     try {
         const parent = resolveConversation("parent").session!;
@@ -1480,7 +1499,11 @@ test("HTTP a cold-restored non-retained parent serves its intact raw tail immedi
         await sendModel(h, "parent", h.messages);
         assert.equal((await h.request("/__bili/plugin/snapshot?conversationId=parent")).status, 200);
         assert.equal(resolveConversation("parent").session!.pluginSnapshot!.length, 3);
-    } finally { await h.close(); }
+    } finally {
+        await h.close();
+        if (oldMode === undefined) delete process.env.BILI_STORAGE_UNIFIED;
+        else process.env.BILI_STORAGE_UNIFIED = oldMode;
+    }
 });
 
 test("fork protocol v2: snapshot serves the light revision, a stale v1 whole-store revision is still accepted (#2671 Phase 2b)", { timeout: 60_000 }, async () => {
